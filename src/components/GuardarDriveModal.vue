@@ -70,6 +70,7 @@
 
 <script>
 import archivoService from '@/services/archivoService';
+import fileManagerService from '@/services/fileManagerService';
 
 export default {
     name: 'GuardarDriveModal',
@@ -99,6 +100,7 @@ export default {
             },
             tiposReporte: [],
             guardando: false,
+            autenticando: false, // 🔥 Nueva bandera para evitar múltiples intentos
             error: null,
             exitoMensaje: null
         };
@@ -148,6 +150,11 @@ export default {
                 return;
             }
 
+            // 🔥 Evitar múltiples intentos de autenticación
+            if (this.autenticando) {
+                return;
+            }
+
             this.guardando = true;
             this.error = null;
             this.exitoMensaje = null;
@@ -171,8 +178,58 @@ export default {
 
             } catch (error) {
                 console.error('Error al guardar archivo:', error);
-                this.error = error.response?.data?.error ||
-                    'Error al guardar el archivo. Intente nuevamente.';
+                
+                // Si es error de autenticación, redirigir a autenticación
+                if (error.needsAuth && error.authUrl) {
+                    this.autenticando = true; // 🔥 Marcar que estamos autenticando
+                    this.error = 'Se requiere autenticación con Google Drive. Serás redirigido...';
+                    
+                    // Abrir ventana de autenticación
+                    const authWindow = window.open(
+                        error.authUrl,
+                        'google-auth',
+                        'width=500,height=600,scrollbars=yes,resizable=yes'
+                    );
+                    
+                    // Escuchar mensajes de la ventana de autenticación
+                    const messageHandler = async (event) => {
+                        if (event.data.type === 'auth_success') {
+                            clearInterval(checkAuth);
+                            window.removeEventListener('message', messageHandler);
+                            
+                            if (authWindow && !authWindow.closed) {
+                                authWindow.close();
+                            }
+                            
+                            // Procesar el callback
+                            this.procesarCallback(event.data.code, event.data.state);
+                        }
+                    };
+                    
+                    window.addEventListener('message', messageHandler);
+                    
+                    // Esperar respuesta de autenticación
+                    const checkAuth = setInterval(() => {
+                        if (authWindow.closed) {
+                            clearInterval(checkAuth);
+                            window.removeEventListener('message', messageHandler);
+                            this.error = 'Autenticación cancelada. Intente nuevamente.';
+                        }
+                    }, 1000);
+                    
+                    // Timeout después de 5 minutos
+                    setTimeout(() => {
+                        clearInterval(checkAuth);
+                        if (authWindow && !authWindow.closed) {
+                            authWindow.close();
+                        }
+                        this.error = 'Tiempo de autenticación agotado. Intente nuevamente.';
+                    }, 300000);
+                    
+                } else {
+                    this.error = error.response?.data?.error ||
+                        'Error al guardar el archivo. Intente nuevamente.';
+                }
             } finally {
                 this.guardando = false;
             }
@@ -192,6 +249,27 @@ export default {
             };
             this.error = null;
             this.exitoMensaje = null;
+            this.autenticando = false; // 🔥 Resetear bandera de autenticación
+        },
+
+        async procesarCallback(code, state) {
+            try {
+                this.error = 'Procesando autenticación...';
+                
+                await fileManagerService.handleAuthCallback(code, state);
+                this.error = null;
+                this.autenticando = false; // 🔥 Resetear bandera al completar
+                
+                // Reintentar guardar automáticamente
+                setTimeout(() => {
+                    this.guardar();
+                }, 1000);
+                
+            } catch (error) {
+                console.error('Error al procesar callback:', error);
+                this.error = `Error en autenticación: ${error.message}`;
+                this.autenticando = false; // 🔥 Resetear bandera en caso de error
+            }
         },
 
         formatearTamaño(bytes) {
